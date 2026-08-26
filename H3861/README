@@ -1,0 +1,20 @@
+# Hi3861 SG90 舵机与互斥锁实验
+
+## 8月26日完成
+
+- 创建 `3.0_SG90_Mutex` 工程
+- 使用 GPIO2 输出软件 PWM 控制 SG90
+- 编写0°、45°、90°、135°和180°控制函数
+- 创建三个 OpenHarmony 线程
+- 使用互斥锁协调线程对舵机资源的访问
+- 修改两层 `BUILD.gn`
+- 完成 Hi3861 工程编译
+
+## 主要知识
+
+- `APP_FEATURE_INIT()`：注册应用启动函数
+- `osThreadNew()`：创建线程
+- `osMutexNew()`：创建互斥锁
+- `osMutexAcquire()`：获取互斥锁
+- `osMutexRelease()`：释放互斥锁
+- `hi_udelay()`：产生微秒级延时
