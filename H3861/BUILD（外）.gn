@@ -1,0 +1,7 @@
+import("//build/lite/config/component/lite_component.gni")
+
+lite_component("app") {
+    features = [
+        "3.0_SG90_Mutex:SG90",
+    ]
+}
