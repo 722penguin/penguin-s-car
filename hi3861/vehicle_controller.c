@@ -26,7 +26,12 @@
 #define ECHO_GPIO 8
 #define TRACE_LEFT_GPIO 13
 #define TRACE_RIGHT_GPIO 14
-#define OBSTACLE_CM 20.0f
+#define OBSTACLE_CM 25.0f
+#define AVOID_SPEED 100
+#define AVOID_BACKUP_TICKS 10U  /* 10 x 50 ms = 500 ms */
+#define AVOID_TURN_TICKS 14U    /* 14 x 50 ms = 700 ms */
+#define AVOID_HIT_CONFIRM 2U
+#define AVOID_STATUS_TICKS 20U  /* print distance about once per second */
 #define EDGE_SPEED 100
 #define EDGE_BACKUP_TICKS 8U  /* 8 x 50 ms = 400 ms */
 #define EDGE_TURN_TICKS 10U   /* 10 x 50 ms = 500 ms */
@@ -42,6 +47,12 @@ typedef enum {
     EDGE_TURN_AWAY
 } EdgeGuardState;
 
+typedef enum {
+    AVOID_DRIVE_FORWARD = 0,
+    AVOID_BACK_UP,
+    AVOID_TURN
+} AvoidState;
+
 /* Power on in a safe stopped state.  Start autonomous edge guard explicitly
    with the Bluetooth G command after sensor polarity is checked. */
 static volatile VehicleMode g_mode = VEHICLE_MODE_STOP;
@@ -50,6 +61,10 @@ static volatile int16_t g_right_target;
 static EdgeGuardState g_edge_state = EDGE_DRIVE_FORWARD;
 static uint8_t g_edge_ticks;
 static uint8_t g_turn_right;
+static AvoidState g_avoid_state = AVOID_DRIVE_FORWARD;
+static uint8_t g_avoid_ticks;
+static uint8_t g_avoid_hits;
+static uint8_t g_avoid_status_ticks;
 static volatile uint8_t g_frame_requested;
 static int16_t g_manual_speed = BLUETOOTH_SPEED_HIGH;
 static unsigned long long g_run_deadline_us;
@@ -172,6 +187,72 @@ static void EdgeGuardControl(void)
     }
     if (g_edge_ticks > 0U) g_edge_ticks--;
     if (g_edge_ticks == 0U) g_edge_state = EDGE_DRIVE_FORWARD;
+}
+
+/* Circle-arena avoid: drive forward, then back up and spin right when the
+   front ultrasonic sees a wall.  Timeout is treated as blocked so a dead
+   sensor does not drive into the wall. */
+static void ObstacleAvoidControl(void)
+{
+    float distance = ReadDistanceCm();
+    uint8_t blocked;
+
+    blocked = (distance < 0.0f || distance < OBSTACLE_CM) ? 1U : 0U;
+
+    if (g_avoid_state == AVOID_DRIVE_FORWARD) {
+        if (g_avoid_status_ticks > 0U) g_avoid_status_ticks--;
+        if (g_avoid_status_ticks == 0U) {
+            if (distance < 0.0f) printf("AVOID dist=timeout state=fwd\r\n");
+            else printf("AVOID dist=%d state=fwd\r\n", (int)distance);
+            g_avoid_status_ticks = AVOID_STATUS_TICKS;
+        }
+
+        if (blocked == 0U) {
+            g_avoid_hits = 0U;
+            g_left_target = AVOID_SPEED;
+            g_right_target = AVOID_SPEED;
+            return;
+        }
+
+        if (g_avoid_hits < AVOID_HIT_CONFIRM) g_avoid_hits++;
+        if (g_avoid_hits < AVOID_HIT_CONFIRM) {
+            g_left_target = AVOID_SPEED;
+            g_right_target = AVOID_SPEED;
+            return;
+        }
+
+        g_avoid_hits = 0U;
+        g_avoid_state = AVOID_BACK_UP;
+        g_avoid_ticks = AVOID_BACKUP_TICKS;
+        g_left_target = -AVOID_SPEED;
+        g_right_target = -AVOID_SPEED;
+        if (distance < 0.0f) printf("AVOID wall: timeout -> backup\r\n");
+        else printf("AVOID wall: dist=%d -> backup\r\n", (int)distance);
+        return;
+    }
+
+    if (g_avoid_state == AVOID_BACK_UP) {
+        g_left_target = -AVOID_SPEED;
+        g_right_target = -AVOID_SPEED;
+        if (g_avoid_ticks > 0U) g_avoid_ticks--;
+        if (g_avoid_ticks == 0U) {
+            g_avoid_state = AVOID_TURN;
+            g_avoid_ticks = AVOID_TURN_TICKS;
+            printf("AVOID turn right\r\n");
+        }
+        return;
+    }
+
+    /* In-place right turn so a closed ring tends to keep circulating. */
+    g_left_target = AVOID_SPEED;
+    g_right_target = -AVOID_SPEED;
+    if (g_avoid_ticks > 0U) g_avoid_ticks--;
+    if (g_avoid_ticks == 0U) {
+        g_avoid_state = AVOID_DRIVE_FORWARD;
+        g_avoid_hits = 0U;
+        g_avoid_status_ticks = 0U;
+        printf("AVOID resume forward\r\n");
+    }
 }
 
 static void SendControlFrame(void)
@@ -344,14 +425,7 @@ static void VehicleMainTask(void)
         now = hi_get_us();
         if (now - last_sensor_us >= SENSOR_PERIOD_US) {
             if (g_mode == VEHICLE_MODE_OBSTACLE_AVOID) {
-                float distance = ReadDistanceCm();
-                if (distance < 0.0f || distance < OBSTACLE_CM) {
-                    g_left_target = 0;
-                    g_right_target = 0;
-                } else {
-                    g_left_target = BLUETOOTH_SPEED_LOW;
-                    g_right_target = BLUETOOTH_SPEED_LOW;
-                }
+                ObstacleAvoidControl();
             } else if (g_mode == VEHICLE_MODE_EDGE_GUARD) {
                 EdgeGuardControl();
             }
@@ -372,6 +446,10 @@ void Vehicle_SetMode(VehicleMode mode)
     g_mode = mode;
     g_edge_state = EDGE_DRIVE_FORWARD;
     g_edge_ticks = 0U;
+    g_avoid_state = AVOID_DRIVE_FORWARD;
+    g_avoid_ticks = 0U;
+    g_avoid_hits = 0U;
+    g_avoid_status_ticks = 0U;
     if (mode == VEHICLE_MODE_STOP) Vehicle_EmergencyStop();
     g_frame_requested = 1U;
 }

@@ -1,97 +1,61 @@
-# 9.2 双核蓝牙小车——核心改动提交版
+# 双核小车超声波避障核心代码
 
-这是 9 月 2 日联调的精简 GitHub 提交，只保留本次真正修改并能体现主要工作量的业务代码，不包含 STM32 标准库、Keil 缓存、厂商 SDK 和编译产物。
+本目录是 2026-09-03 整理的 GitHub 提交版，仅保留 Hi3861 与 STM32 的核心业务代码，不包含 OpenHarmony SDK、STM32 标准库、Keil 缓存和编译产物。
 
-实测结果：手机通过 JDY-16 发送 `W`，车辆成功前进；发送 `0`，车辆停车。防跌落和避障代码已经实现，但还需要继续进行传感器极性与实车安全验证。
+本次已经完成超声波测距、连续命中确认、后退避让、原地转向、恢复前进以及通信失效停车等主要功能的代码实现，并整理为可移植到现有双核小车工程的核心提交。
 
-当天完整排错过程和弯路复盘见 [9.2.md](9.2.md)。
+## 本次主要实现
 
-## 核心改动
+Hi3861 使用 GPIO7 产生超声波 TRIG 信号，GPIO8 读取 ECHO，并通过非阻塞状态机控制避障：
 
-### Hi3861
+1. 手机通过 JDY-16 发送 `V`，进入超声波避障模式。
+2. 小车以目标速度 100 前进，每约 50 ms 测量一次前方距离。
+3. 连续两次检测到距离小于 25 cm，或测距超时，判定前方受阻。
+4. 小车后退约 500 ms，随后原地右转约 700 ms。
+5. 转向结束后恢复前进并继续测距。
+6. 手机发送数字 `0` 可随时停车。
 
-- `hi3861/vehicle_controller.c`：本次最主要的代码，包含 UART1 蓝牙接收、命令解析、定时控制、UART2 发帧、防跌落状态机、超声波避障和调试日志。
-- `hi3861/vehicle_protocol.c/.h`：将左右轮有符号目标速度编码为老师参考代码使用的 6 字节协议。
-- `hi3861/BUILD.gn`：OpenHarmony Lite 应用构建目标。
+核心实现位于 `hi3861/vehicle_controller.c` 的 `ReadDistanceCm()` 和 `ObstacleAvoidControl()`。
 
-### STM32
-
-- `stm32/usart_vehicle.c/.h`：USART1 115200 接收与逐字节解帧。
-- `stm32/vehicle_protocol.c/.h`：校验 `FC ... FD` 帧并还原左右轮有符号速度。
-- `stm32/vehicle_motor_app.c/.h`：通信失效保护、编码器闭环 PID、PWM 输出以及解决“电机只响不转”的启动补偿。
-- `stm32/vehicle_ws2812.c/.h`：根据左右轮目标渲染转向灯，并执行开机灯光自检。
-- `stm32/main.c`：初始化入口和 20 ms 控制循环。
-
-## 最终架构
+## 通信架构
 
 ```text
-手机 ──BLE──> JDY-16
-              │ UART1，GPIO0/GPIO1，9600 8N1
-              ▼
-            Hi3861
-              │ UART2，GPIO11/GPIO12，115200 8N1
-              │ FC L_DIR L_SPEED R_DIR R_SPEED FD
-              ▼
-          STM32F103 ──PID/PWM──> 左右电机
+手机 LightBlue
+  -> JDY-16
+  -> Hi3861 UART1：GPIO0/GPIO1，9600 8N1
+  -> Hi3861 UART2：GPIO11/GPIO12，115200 8N1
+  -> STM32 USART1：PA10/PA9
+  -> 编码器 PID + PWM -> 左右电机
 ```
 
-## 指令
+Hi3861 向 STM32 发送固定六字节控制帧：
 
-| 功能 | ASCII | Hex |
-|---|---|---|
+```text
+FC L_DIR L_SPEED R_DIR R_SPEED FD
+```
+
+STM32 超过约 200 ms 没有收到有效控制帧时停车。
+
+## 核心指令
+
+| 功能 | 文本 | Hex |
+| --- | --- | --- |
 | 前进 | `W` | `57` |
 | 后退 | `S` | `53` |
 | 左转 | `A` | `41` |
 | 右转 | `D` | `44` |
 | 停车 | `0` | `30` |
-| 慢速 100 | `I` | `49` |
-| 快速 150 | `K` | `4B` |
-| 防跌落 | `G` | `47` |
-| 打印底部探头电平 | `P` | `50` |
 | 超声波避障 | `V` | `56` |
 
-方向字母后可以附加以 0.1 秒为单位的时长。例如 `W50` 表示前进 5 秒后自动停车；LightBlue 的 Hex 模式下一次发送 `573530`。
+## 构建说明
 
-## 集成方法
+- `hi3861/` 需要放入 OpenHarmony Hi3861 SDK 的应用目录，并在上层 `BUILD.gn` 中加入 `目录名:vehicle_comm_experiment`。构建前确保 SDK 的 AT 任务没有占用 UART1。
+- `stm32/` 是当前 Keil 工程实际引用的核心业务文件副本。完整构建仍需原工程中的 STM32 标准库以及 `motor`、`encoder`、`delay`、`sys` 等驱动。
 
-### Hi3861
+## 完成情况
 
-1. 将 `hi3861` 中的文件放入 OpenHarmony SDK 的应用目录。
-2. 在上层 `applications/sample/wifi-iot/app/BUILD.gn` 的 `features` 中加入该目录的目标：
-
-```gn
-"你的目录名:vehicle_comm_experiment"
-```
-
-3. 关闭 `CONFIG_AT_COMMAND` 或禁止 SDK 调用 `hi_at_init()`，否则 AT 任务会占用 UART1，导致应用收不到 JDY-16 数据。
-4. 执行 `python3 build.py wifiiot` 并烧录生成的 all-in-one BIN。
-
-启动成功必须出现：
-
-```text
-vehicle app init: uart0=0 uart1=0@9600 uart2=0@115200 frame=FC..FD
-vehicle main task started: BLE UART1 9600 + STM32 UART2 115200
-```
-
-### STM32
-
-将 `stm32` 中的源文件加入老师提供的 STM32F103 Keil 模板，并保留模板中的标准库、`motor`、`encoder`、`delay` 和 `sys` 驱动。不要同时启用另一套占用 USART1 的接收代码。
-
-最终关键参数：
-
-```text
-USART1 = 115200 8N1
-PWM_Init(7199, 9)
-非零目标启动补偿 = ±3600
-控制周期 = 20 ms
-通信超时停车 = 200 ms
-```
-
-本次完整工程使用 Keil ARMCC V5.06 验证结果为 `0 Error(s), 0 Warning(s)`。
-
-## 测试注意事项
-
-- 首次测试将轮子悬空，并使用小车电池供电。
-- 电机持续嗡鸣但不转时立即发送 `0`，避免堵转发热。
-- 启动防跌落前，先发送 `P` 验证两只底部探头在桌面和悬空时会正确翻转。
-- 当前代码假定“桌面 = 0，悬空 = 1”；未验证前不要直接让小车冲向桌沿。
+- 超声波避障控制流程及双核通信代码已经实现。
+- 历史实测已确认：`W` 可使小车前进，`0` 可停车。
+- 历史 STM32 完整工程使用 ARMCC V5.06 构建为 0 error、0 warning。
+- 本提交未附带新的 OpenHarmony 构建日志和避障实车测试记录。
+- 25 cm、后退 500 ms、右转 700 ms 是初始参数，需要结合实际场地标定。
